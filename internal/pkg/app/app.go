@@ -14,7 +14,7 @@ type App struct {
 }
 
 func New() *App {
-	redisCahche := redis.New(os.Getenv("REDDIS_ADDR"), os.Getenv("REDDIS_PASS"))
+	redisCahche := redis.New(os.Getenv("REDIS_ADDR"), os.Getenv("REDIS_PASSWORD"))
 	endpoint, err := endpoint.New(redisCahche)
 	if err != nil {
 		panic(err)
