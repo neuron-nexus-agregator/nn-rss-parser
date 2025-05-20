@@ -55,7 +55,7 @@ func (s *Service) Parse(url, sourceName string) (newItems []model.Item, err erro
 		if !s.validateURL(item) {
 			continue
 		}
-		if ok, text, err := s.cahce.Exists(item.MD5); err == nil && ok {
+		if ok, text, err := s.cahce.Exists("rss:" + item.MD5); err == nil && ok {
 			if text != item.FullText {
 				item.Changed = true
 			}
@@ -63,7 +63,7 @@ func (s *Service) Parse(url, sourceName string) (newItems []model.Item, err erro
 			log.Printf("Ошибка при проверке кеша: %v\n", err)
 			continue
 		} else {
-			err = s.cahce.Set(item.MD5, item.FullText)
+			err = s.cahce.Set("rss:"+item.MD5, item.FullText)
 			if err != nil {
 				log.Printf("Ошибка при записи в кеш: %v\n", err)
 				continue
