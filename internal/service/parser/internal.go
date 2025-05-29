@@ -4,10 +4,8 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"io"
-	"log"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/mmcdole/gofeed"
 
@@ -41,16 +39,23 @@ func (s *Service) md5(item *gofeed.Item) string {
 
 // extractFullText извлекает полный текст из элемента.
 func extractFullText(item *gofeed.Item) (string, bool) {
+
+	// Если расширение отсутствует, используем контент.
+	if len(item.Content) > 0 {
+		return item.Content, true
+	}
+
 	// Проверяем наличие расширения "full-text".
 	for _, val := range item.Extensions {
 		if ext, exists := val["full-text"]; exists && len(ext) > 0 {
 			return ext[0].Value, true
+		} else if ext, exists = val["full_text"]; exists && len(ext) > 0 {
+			return ext[0].Value, true
+		} else if ext, exists = val["fulltext"]; exists && len(ext) > 0 {
+			return ext[0].Value, true
+		} else if ext, exists = val["fullText"]; exists && len(ext) > 0 {
+			return ext[0].Value, true
 		}
-	}
-
-	// Если расширение отсутствует, используем контент.
-	if item.Content != "" {
-		return item.Content, true
 	}
 
 	// Если контент отсутствует, возвращаем пустую строку.
@@ -58,13 +63,13 @@ func extractFullText(item *gofeed.Item) (string, bool) {
 }
 
 func (s *Service) processItem(sourceName string, item *gofeed.Item) (model.Item, bool) {
-	now := time.Now()
+	//now := time.Now()
 	if item.PublishedParsed == nil {
 		return model.Item{}, false
 	}
-	if now.Sub(*item.PublishedParsed) > s.dur {
-		return model.Item{}, false
-	}
+	// if now.Sub(*item.PublishedParsed) > s.dur {
+	// 	return model.Item{}, false
+	// }
 	fullText, got := s.check(item)
 
 	category := ""
@@ -102,18 +107,21 @@ func (s *Service) getEnclosure(item *gofeed.Item) string {
 func (s *Service) logProblematicPage(url string) {
 	res, err := http.Get(url)
 	if err != nil {
-		log.Printf("Ошибка HTTP GET для URL: %s, ошибка: %v\n", url, err)
+		s.logger.Error("Ошибка HTTP GET для URL", "url", url, "error", err)
 		return
 	}
 	defer res.Body.Close()
 
 	data, err := io.ReadAll(res.Body)
 	if err != nil {
-		log.Printf("Ошибка при чтении тела ответа: %v\n", err)
+		s.logger.Error("Ошибка при чтении тела ответа", "url", url, "error", err)
 		return
 	}
-
-	log.Printf("Содержимое проблемной страницы (первые 500 символов): %s\n", string(data[:500]))
+	if len(data) > 500 {
+		s.logger.Info("Проблемная страница", "url", url, "data", string(data[:500]))
+	} else {
+		s.logger.Info("Проблемная страница", "url", url, "data", string(data))
+	}
 }
 
 func (s *Service) validateURL(item model.Item) bool {
@@ -128,17 +136,6 @@ func (s *Service) validateURL(item model.Item) bool {
 			return false
 		}
 	}
-
-	req, err := http.NewRequest(http.MethodGet, item.Link, nil)
-	if err != nil {
-		return false
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36")
-	res, err := http.DefaultClient.Do(req)
-	if err != nil || res.StatusCode != http.StatusOK {
-		return false
-	}
-	defer res.Body.Close()
 
 	return true
 }

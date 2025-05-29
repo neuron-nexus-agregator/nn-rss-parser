@@ -2,8 +2,10 @@ package main
 
 import (
 	"agregator/rss/internal/pkg/app"
+	"log/slog"
 )
 
 func main() {
-	app.New().Run()
+	logger := slog.Default()
+	app.New(logger).Run()
 }

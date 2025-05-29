@@ -3,21 +3,24 @@ package kafka
 import (
 	"context"
 	"encoding/json"
-	"log"
 	"time"
 
-	"github.com/segmentio/kafka-go"
-
+	"agregator/rss/internal/interfaces"
 	"agregator/rss/internal/model/rss"
+
+	"github.com/segmentio/kafka-go"
 )
 
 type Kafka struct {
 	writer *kafka.Writer
+	logger interfaces.Logger
 }
 
 // New создает новый экземпляр Kafka для записи в указанный топик
-func New() *Kafka {
-	return &Kafka{}
+func New(logger interfaces.Logger) *Kafka {
+	return &Kafka{
+		logger: logger,
+	}
 }
 
 // StartWriting принимает канал rss.Item и записывает данные в Kafka
@@ -32,7 +35,7 @@ func (k *Kafka) StartWriting(brokers []string, topic string, input <-chan rss.It
 			// Сериализуем rss.Item в JSON
 			data, err := json.Marshal(item)
 			if err != nil {
-				log.Printf("Error encoding item to JSON: %v\n", err)
+				k.logger.Error("Error marshaling rss.Item to JSON", "error", err)
 				continue
 			}
 
@@ -49,9 +52,7 @@ func (k *Kafka) StartWriting(brokers []string, topic string, input <-chan rss.It
 			err = k.writer.WriteMessages(ctx, message)
 			cancel()
 			if err != nil {
-				log.Printf("Error writing message to Kafka: %v\n", err)
-			} else {
-				log.Printf("Message written to Kafka: %s\n", item.MD5)
+				k.logger.Error("Error writing message to Kafka", "error", err)
 			}
 		}
 	}()

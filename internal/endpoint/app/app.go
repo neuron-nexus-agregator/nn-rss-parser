@@ -1,10 +1,11 @@
 package app
 
 import (
+	"fmt" // Добавлен импорт fmt
 	"log"
-	"sync"
 	"time"
 
+	"agregator/rss/internal/interfaces"
 	"agregator/rss/internal/model/db"
 	"agregator/rss/internal/model/rss"
 	"agregator/rss/internal/service/db/sources"
@@ -23,12 +24,12 @@ type App struct {
 	db         *sources.SourceDB
 	parser     *parser.Service
 	sources    []db.Source
-	sourceMap  map[string]int // Мапа для быстрого доступа к индексам источников
 	output     chan rss.Item
 	noFullText chan rss.Item
+	logger     interfaces.Logger
 }
 
-// Валидирует источники и приводит их в нормальное состояние
+// validateSources валидирует источники и приводит их в нормальное состояние
 func validateSources(sourceDB *sources.SourceDB, sourceItems ...db.Source) []db.Source {
 	sourceItemsParsed := make([]db.Source, 0, len(sourceItems))
 	for _, sp := range sourceItems {
@@ -46,9 +47,9 @@ func validateSources(sourceDB *sources.SourceDB, sourceItems ...db.Source) []db.
 	return sourceItemsParsed
 }
 
-// Создает новый экземпляр приложения
-func New(cache *redis.RedisCache) (*App, error) {
-	sourceDB, err := sources.New()
+// New создает новый экземпляр приложения
+func New(cache *redis.RedisCache, logger interfaces.Logger) (*App, error) {
+	sourceDB, err := sources.New(logger)
 	if err != nil {
 		return nil, err
 	}
@@ -58,10 +59,13 @@ func New(cache *redis.RedisCache) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
+	fmt.Println("Получено источников из базы данных:", len(dbSources))
 	validSources := validateSources(sourceDB, dbSources...)
+	fmt.Println("Валидированных источников:", len(validSources))
 
 	if len(validSources) == 0 {
-		return nil, log.Output(2, "No sources to parse") // Исправлено: убран panic
+		// Исправлено: возвращаем явную ошибку вместо log.Output
+		return nil, fmt.Errorf("no sources to parse")
 	}
 
 	return &App{
@@ -69,42 +73,39 @@ func New(cache *redis.RedisCache) (*App, error) {
 		sources:    validSources,
 		output:     make(chan rss.Item, 30),
 		noFullText: make(chan rss.Item, 30),
-		parser:     parser.New(cache, 72*time.Hour),
+		parser:     parser.New(cache, 72*time.Hour, logger),
+		logger:     logger,
 	}, nil
 }
 
-// Возвращает канал с элементами, содержащими полный текст
+// Output возвращает канал с элементами, содержащими полный текст
 func (a *App) Output() <-chan rss.Item {
 	return a.output
 }
 
-// Возвращает канал с элементами без полного текста
+// NoFullText возвращает канал с элементами без полного текста
 func (a *App) NoFullText() <-chan rss.Item {
 	return a.noFullText
 }
 
-// Обновляет мапу источников
-func (a *App) updateSourceMap() {
-	a.sourceMap = make(map[string]int)
-	for i, source := range a.sources {
-		a.sourceMap[source.Url] = i
-	}
-}
-
-// Обрабатывает источник
+// startParsincBySource обрабатывает источник
 func (a *App) startParsincBySource(source *db.Source) {
 	newItems, err := a.parser.Parse(source.Url, source.Name)
 	if err != nil {
-		log.Printf("Ошибка при парсинге источника с ID %d: %v", source.Id, err)
+		a.logger.Error("Ошибка при парсинге источника", "id", source.Id, "error", err)
+		err = a.changeUpdateInterval(source, +UPDATE_STEP)
+		if err != nil {
+			a.logger.Error("Ошибка при изменении интервала обновления", "id", source.Id, "error", err)
+		}
 		return
 	}
 	if len(newItems) == 0 {
-		err = a.changeUpdateInterval(source, +UPDATE_STEP)
+		err = a.changeUpdateInterval(source, +2*UPDATE_STEP)
 	} else {
 		err = a.changeUpdateInterval(source, -UPDATE_STEP)
 	}
 	if err != nil {
-		log.Printf("Ошибка при изменении интервала обновления для источника с ID %d: %v", source.Id, err)
+		a.logger.Error("Ошибка при изменении интервала обновления", "id", source.Id, "error", err)
 	}
 	for _, item := range newItems {
 		if item.HasFullText {
@@ -115,9 +116,8 @@ func (a *App) startParsincBySource(source *db.Source) {
 	}
 }
 
-// Изменяет интервал обновления источника
+// changeUpdateInterval изменяет интервал обновления источника
 func (a *App) changeUpdateInterval(source *db.Source, change int) error {
-
 	now := time.Now().Add(3 * time.Hour).Hour()
 	if now < 7 || now > 20 {
 		return nil
@@ -132,95 +132,38 @@ func (a *App) changeUpdateInterval(source *db.Source, change int) error {
 	return a.db.ChangeUpdateInterval(source.Id, newInterval)
 }
 
-// Запускает приложение
+// Start запускает приложение
 func (a *App) Start() {
-	var mu sync.Mutex
-	activeSources := make(map[string]*time.Ticker) // Хранение активных тикеров для каждого источника (по URL)
-
-	// Запуск обработки всех текущих источников
-	a.startAllSources(&mu, activeSources)
-
-	// Обновление списка источников каждые 10 минут
-	go a.updateSourcesPeriodically(&mu, activeSources)
+	// Исправлено: итерируемся по индексу, чтобы получить адрес элемента
+	for i := range a.sources {
+		a.startSource(&a.sources[i]) // Передаем указатель на элемент
+	}
 
 	// Бесконечный цикл для удержания выполнения программы
 	select {}
 }
 
-// Запускает обработку всех текущих источников
-func (a *App) startAllSources(mu *sync.Mutex, activeSources map[string]*time.Ticker) {
-	for _, source := range a.sources {
-		a.startSource(source, mu, activeSources)
-	}
-}
-
-// Запускает обработку одного источника
-func (a *App) startSource(source db.Source, mu *sync.Mutex, activeSources map[string]*time.Ticker) {
-	mu.Lock()
-	if _, exists := activeSources[source.Url]; exists {
-		mu.Unlock()
-		return // Источник уже запущен
-	}
+// startSource запускает обработку одного источника
+// Исправлено: теперь принимает указатель на db.Source
+func (a *App) startSource(source *db.Source) {
 	ticker := time.NewTicker(time.Duration(source.UpdateInterval) * time.Second)
-	activeSources[source.Url] = ticker
-	mu.Unlock()
 
-	go func() {
+	// Исправлено: передаем source как s *db.Source в горутину
+	go func(ticker *time.Ticker, s *db.Source) {
+		a.startParsincBySource(s)
 		for range ticker.C {
 			// Запускаем обработку для источника
-			a.startParsincBySource(&source)
+			go func(id int64) {
+				err := a.db.SetLastRead(id)
+				if err != nil {
+					a.logger.Error("Ошибка при установке времени последнего обновления", "id", id, "error", err)
+				}
+			}(s.Id) // Используем s.Id
+			a.startParsincBySource(s) // Передаем указатель s
 
 			// Обновляем интервал тикера
-			mu.Lock()
-			newInterval := time.Duration(source.UpdateInterval) * time.Second
+			newInterval := time.Duration(s.UpdateInterval) * time.Second // Используем s.UpdateInterval
 			ticker.Reset(newInterval)
-			mu.Unlock()
 		}
-	}()
-}
-
-// Останавливает обработку источника
-func (a *App) stopSource(url string, mu *sync.Mutex, activeSources map[string]*time.Ticker) {
-	mu.Lock()
-	defer mu.Unlock()
-	if ticker, exists := activeSources[url]; exists {
-		ticker.Stop()
-		delete(activeSources, url)
-	}
-}
-
-// Обновляет список источников каждые 10 минут
-func (a *App) updateSourcesPeriodically(mu *sync.Mutex, activeSources map[string]*time.Ticker) {
-	for range time.NewTicker(10 * time.Minute).C {
-		// Получаем обновленный список источников из базы данных
-		dbSources, err := a.db.GetSources()
-		if err != nil {
-			log.Printf("Ошибка при получении источников из базы данных: %v", err)
-			continue
-		}
-
-		// Приводим источники в нормальное состояние
-		newSources := validateSources(a.db, dbSources...)
-
-		mu.Lock()
-		currentSources := make(map[string]struct{})
-		for _, source := range newSources {
-			currentSources[source.Url] = struct{}{}
-			if _, exists := activeSources[source.Url]; !exists {
-				a.startSource(source, mu, activeSources) // Запускаем обработку для новых источников
-			}
-		}
-
-		// Останавливаем обработку для удаленных источников
-		for url := range activeSources {
-			if _, exists := currentSources[url]; !exists {
-				a.stopSource(url, mu, activeSources)
-			}
-		}
-
-		// Обновляем список источников и мапу
-		a.sources = newSources
-		a.updateSourceMap()
-		mu.Unlock()
-	}
+	}(ticker, source) // Передаем source (который уже является указателем)
 }
